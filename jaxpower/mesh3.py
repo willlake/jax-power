@@ -603,7 +603,11 @@ def compute_mesh3_spectrum(*meshes: RealMeshField | ComplexMeshField, bin: BinMe
                     tmp = tuple(meshes[i] * Ylms[i][im[i]](*kvec) for i in range(2))
                     tmp += (Ylms[2][im[2]](*los) * meshes[2],)
                     tmp = coeff.astype(mattrs.rdtype) * bin(*tmp)  # remove_zero=True)
-                    return tmp + sym.astype(mattrs.rdtype) * tmp.conj()
+                    # Cast back to the mesh dtype: with x64 enabled (e.g.
+                    # flipped globally by a cosmoprimo import), the numpy
+                    # complex128 Ylm constants promote the branch output and
+                    # break the complex64 scan carry.
+                    return (tmp + sym.astype(mattrs.rdtype) * tmp.conj()).astype(mattrs.cdtype)
                 branches.append(branch)
 
             def f(carry, idx):
@@ -811,7 +815,9 @@ def _compute_scoccimarro_S(cmeshw, cmeshw2, sumw3, bin=None, los='z'):
 
         @partial(jax.checkpoint, static_argnums=(0, 1))
         def f(Ylm, carry, im):
-            carry += mattrs.r2c(rmesh * jax.lax.switch(im, Ylm, *xvec)) * jax.lax.switch(im, Ylm, *kvec)
+            inc = mattrs.r2c(rmesh * jax.lax.switch(im, Ylm, *xvec)) * jax.lax.switch(im, Ylm, *kvec)
+            # Cast to the carry dtype (see _compute_sugiyama_spectrum_S113).
+            carry += inc.clone(value=inc.value.astype(carry.value.dtype))
             return carry, im
 
         xs = np.arange(len(Ylms))
@@ -841,7 +847,8 @@ def _compute_scoccimarro_S(cmeshw, cmeshw2, sumw3, bin=None, los='z'):
                 # Second line of eq. 58
                 tmp = cmeshw3_ell * Ylm
                 tmp = [bin_mesh2(tmp, axis=axis) for axis in range(mattrs.ndim - 1)] + [bin_mesh2(Ylm, axis=mattrs.ndim - 1)]
-                carry += (4 * jnp.pi) * sum(tmp[axis][bin._iedges[..., axis]] * tmp[mattrs.ndim - 1][bin._iedges[..., mattrs.ndim - 1]] for axis in range(mattrs.ndim - 1))
+                # Cast to the carry dtype (see _compute_sugiyama_spectrum_S113).
+                carry += ((4 * jnp.pi) * sum(tmp[axis][bin._iedges[..., axis]] * tmp[mattrs.ndim - 1][bin._iedges[..., mattrs.ndim - 1]] for axis in range(mattrs.ndim - 1))).astype(carry.dtype)
                 return carry, im
 
             Ylms = [get_Ylm(ell, m, reduced=False, real=True) for m in range(-ell, ell + 1)]
@@ -871,7 +878,9 @@ def _compute_sugiyama_spectrum_S122(rmesh, cmesh, s111=dict(), cmesh_s111=1., bi
         im, s111 = im
         # Second and third lines
         los = xvec if vlos is None else vlos
-        carry += jax.lax.switch(im, Ylm, *kvec) * (cmesh * (rmesh * jax.lax.switch(im, Ylm, *los)).r2c().conj() - s111 * cmesh_s111)
+        inc = jax.lax.switch(im, Ylm, *kvec) * (cmesh * (rmesh * jax.lax.switch(im, Ylm, *los)).r2c().conj() - s111 * cmesh_s111)
+        # Cast to the carry dtype (see _compute_sugiyama_spectrum_S113).
+        carry += inc.clone(value=inc.value.astype(carry.value.dtype))
         return carry, im
 
     s122 = []
@@ -906,7 +915,10 @@ def _compute_sugiyama_spectrum_S113(rmesh, cmesh, s111=dict(), cmesh_s111=1., bi
             return jnp.sum(tmp.value * jl[0](snorm * k[0]) * jl[1](snorm * k[1]))
 
         tmp = jax.lax.map(fk, bin.xavg)
-        carry += tmp + sym * tmp.conj()
+        # Cast to the carry dtype: with x64 enabled (e.g. flipped globally by
+        # a cosmoprimo import) the complex Ylm / s111 constants promote the
+        # increment and break the scan carry.
+        carry += (tmp + sym * tmp.conj()).astype(carry.dtype)
         return carry, im
 
     s113 = []
@@ -943,7 +955,9 @@ def _compute_sugiyama_correlation_S122(rmesh, cmesh, s111=dict(), cmesh_s111=1.,
         im, s111 = im
         # Second and third lines
         los = xvec if vlos is None else vlos
-        carry += jax.lax.switch(im, Ylm, *svec) * (cmesh * (rmesh * jax.lax.switch(im, Ylm, *los)).r2c().conj() - s111 * cmesh_s111).c2r()
+        inc = jax.lax.switch(im, Ylm, *svec) * (cmesh * (rmesh * jax.lax.switch(im, Ylm, *los)).r2c().conj() - s111 * cmesh_s111).c2r()
+        # Cast to the carry dtype (see _compute_sugiyama_spectrum_S113).
+        carry += inc.clone(value=inc.value.astype(carry.value.dtype))
         return carry, im
 
     s122 = []
@@ -979,7 +993,8 @@ def _compute_sugiyama_correlation_S113(rmesh, cmesh, s111=dict(), cmesh_s111=1.,
         tmp = coeff * ((rmesh * jax.lax.switch(im[2], Ylms[2], *los).conj()).r2c() * cmesh.conj() - s111 * cmesh_s111)
         tmp = tmp.c2r() * (jax.lax.switch(im[0], Ylms[0], *svec) * jax.lax.switch(im[1], Ylms[1], *svec)).conj()
         tmp = bin_mesh2_inter(tmp)
-        carry += tmp + sym * tmp.conj()
+        # Cast to the carry dtype (see _compute_sugiyama_spectrum_S113).
+        carry += (tmp + sym * tmp.conj()).astype(carry.dtype)
         return carry, im
 
     s113 = []
@@ -1347,6 +1362,7 @@ def compute_smooth3_spectrum_window(window, edgesin: np.ndarray | tuple, ellsin:
     kout = bin.xavg
 
     from .fftlog import SpectrumToCorrelation, CorrelationToSpectrum
+    from .cov2 import matrix_spline_interp, matrix_rebin
 
     def get_w_rect(q, wain):
         transpose = False
@@ -1371,6 +1387,43 @@ def compute_smooth3_spectrum_window(window, edgesin: np.ndarray | tuple, ellsin:
         for kk, edge in zip(k, edgein):
             masks.append((kk >= edge[0]) & (kk < edge[1]))
         return prod(jnp.meshgrid(*masks, indexing='ij', sparse=True)) * value
+
+    def axis_basis_matrices(edges, k_axes, kind):
+        """Per-axis (separable) replacement for the sharp tophat/read: build,
+        for each axis independently, a SMALL matrix of shape (n_k_axis,
+        n_unique_axis) ('spline', input/theory side: a smooth spline basis
+        function per distinct bin center, matrix_spline_interp) or
+        (n_unique_axis, n_k_axis) ('rebin', output side: a proper k^2-weighted
+        bin average, matrix_rebin), keyed by the axis's DISTINCT bin
+        centers/edges -- never the full (nbins1 x nbins2, n_k1 x n_k2) dense
+        tensor (edges may be a masked/paired list, e.g. sugiyama-diagonal's
+        k1=k2, not a full product grid; this stays correct and small either
+        way). Returns (index_per_bin (nbins, ndim), matrices list).
+        """
+        edges_np = np.asarray(edges)
+        centers = edges_np.mean(axis=-1)
+        ndim = centers.shape[-1]
+        index_per_bin = np.empty(centers.shape, dtype=np.int64)
+        matrices = []
+        for d in range(ndim):
+            u, first_idx, inv = np.unique(centers[:, d], return_index=True, return_inverse=True)
+            index_per_bin[:, d] = inv
+            kk = np.asarray(k_axes[d])
+            if kind == 'spline':
+                M = matrix_spline_interp(u, kk, interp_order=3)
+                # matrix_spline_interp extrapolates via the spline's own
+                # boundary polynomial outside [u.min(), u.max()] -- kk
+                # (the fftlog k-grid) typically spans a much wider range
+                # than the input bins, and cubic extrapolation over that
+                # gap explodes; zero it out, matching the implicit zero
+                # of the tophat mask it replaces.
+                in_range = (kk >= u.min()) & (kk <= u.max())
+                M = M * in_range[:, None]
+            else:
+                unique_edges = edges_np[first_idx, d, :]
+                M = matrix_rebin(unique_edges, kk, wt=kk**2, interp_order=3)
+            matrices.append(M)
+        return jnp.asarray(index_per_bin), matrices
 
     def read(kout, k, value):
         # kout tuple of flattened output k's, k tuple defining the k-grid, value is grid
@@ -1444,14 +1497,23 @@ def compute_smooth3_spectrum_window(window, edgesin: np.ndarray | tuple, ellsin:
             for ill, ell in enumerate(ells):
 
                 def convolve(idx, swap=False):
-                    spectrum = tophat(to_spectrum.k, (edgesin_swap if swap else edgesin)[idx], 1.)
-                    correlation = to_correlation(spectrum)[1]
+                    idx_axes = (index_in_swap if swap else index_in)[idx]
+                    theory = Min_axes[0][:, idx_axes[0]][:, None] * Min_axes[1][:, idx_axes[1]][None, :]
+                    correlation = to_correlation(theory)[1]
                     correlation = correlation * Qs * to_correlation.s[0][:, None]**wain[0] * to_correlation.s[1][None, :]**wain[1]
-                    return read(kout.T, to_spectrum.k, to_spectrum(correlation)[1])
+                    # Separable output rebin: Mout_axes[d] is small
+                    # (n_unique_axis, n_k_axis), so this never materializes
+                    # a (nbins1 x nbins2, n_k1 x n_k2) dense tensor -- only
+                    # the same (n_k1, n_k2) grid tophat/read already used.
+                    rebinned = Mout_axes[0] @ to_spectrum(correlation)[1] @ Mout_axes[1].T
+                    return rebinned[index_out[:, 0], index_out[:, 1]]
 
                 tmp = jnp.zeros(shape=(len(kout), len(edgesin)))
                 # fftlog
                 to_spectrum = CorrelationToSpectrum(s=tuple(next(iter(window)).coords().values()), ell=ell, check_level=1, minfolds=0)
+                index_in, Min_axes = axis_basis_matrices(edgesin, to_spectrum.k, kind='spline')
+                index_in_swap = index_in[:, ::-1]
+                index_out, Mout_axes = axis_basis_matrices(bin.edges, to_spectrum.k, kind='rebin')
 
                 wcoeffs = get_sugiyama_window_convolution_coeffs(ell, ellin)
                 Qs = sum(coeff * get_w_rect(q, wain) for q, coeff in wcoeffs)

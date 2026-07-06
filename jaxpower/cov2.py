@@ -148,13 +148,15 @@ def compute_fkp2_covariance_window(fkps, bin=None, los='local', fields=None, spl
                 masks = split_particles(*[get_randoms(fkp) for fkp in _fkps], seed=seed, fields=list(wfield), return_masks=True)
             W0, W1 = [get_W(_fkps[0], mask=masks[0]) * get_W(_fkps[1], mask=masks[1]),
                       get_W(_fkps[2], mask=masks[2]) * get_W(_fkps[3], mask=masks[3])]
-            # mattrs = W[0].attrs
-            # norm is sum(cellsize * W^2) * sum(cellsize * W^2)
-            # compute_mesh2 computes ~ sum(cellsize * W^2) / cellsize^2, so correct norm by cellsize^2
-            #norm = ws[0].sum() * ws[-1].sum() #* mattrs.cellsize.prod()**2 / mattrs.cellsize.prod()**2
-            # We could have used the normalization from the power spectrum estimation,
-            # but this is anyway degenerate with the approximation we're making that W * W ~ W^2
-            update = dict(norm=[W0.sum() * W1.sum() * jnp.ones_like(bin.xavg)] * len(bin.ells))
+            # Normalization: int(n_{wfield0} n_{wfield2}) * int(n_{wfield1} n_{wfield3}),
+            # the ac-bd Wick pairing entering Cov[P_{wfield0 wfield1}, P_{wfield2 wfield3}]
+            # -- NOT the naive product of each spectrum's own (ab)(cd)
+            # normalization (W0.sum() * W1.sum()): that pairing only
+            # coincides with ac-bd for a single, repeated field (the
+            # single-tracer case), not generically for cross-covariances.
+            norm = ((get_W(_fkps[0], mask=masks[0]) * get_W(_fkps[2], mask=masks[2])).sum()
+                    * (get_W(_fkps[1], mask=masks[1]) * get_W(_fkps[3], mask=masks[3])).sum())
+            update = dict(norm=[norm * jnp.ones_like(bin.xavg)] * len(bin.ells))
             windows['WW'][wfield] = compute_mesh2_window(W0, W1, bin=bin, los=los).clone(**update)
             if wfield[3] == wfield[2]:
                 windows['WS'][wfield] = compute_mesh2_window(W0, get_S(_fkps[2:], masks[2]), bin=bin, los=los).clone(**update)
@@ -224,11 +226,13 @@ def compute_mesh2_covariance_window(meshes, bin=None, los='local', fields=None, 
             ws = [get_W(wfield[0]) * get_W(wfield[1])]
             if wfield[2:] != wfield[:2]:
                 ws.append(get_W(wfield[2]) * get_W(wfield[3]))
-            #mattrs = W[0].attrs
-            #norm = W[0].sum() * W[-1].sum() * mattrs.cellsize.prod()**2  # sum(cellsize * W^2) *  sum(cellsize * W^2)
-            # compute_mesh2 computes ~ sum(cellsize * W^2 * W^2) / cellsize^2, so correct norm:
-            #norm = norm / mattrs.cellsize.prod()**2
-            norm = [ws[0].sum() * ws[-1].sum() * jnp.ones_like(bin.xavg)] * len(bin.ells)
+            # Normalization: int(n_{wfield0} n_{wfield2}) * int(n_{wfield1} n_{wfield3}),
+            # the ac-bd Wick pairing entering Cov[P_{wfield0 wfield1}, P_{wfield2 wfield3}]
+            # -- NOT the naive product of each spectrum's own (ab)(cd)
+            # normalization (that pairing degenerates to the same thing only
+            # for a single, repeated field).
+            norm = (get_W(wfield[0]) * get_W(wfield[2])).sum() * (get_W(wfield[1]) * get_W(wfield[3])).sum()
+            norm = [norm * jnp.ones_like(bin.xavg)] * len(bin.ells)
             window[wfield] = compute_mesh2_window(*ws, bin=bin, los=los).clone(norm=norm)
     return ObservableTree(list(window.values()), fields=[tuple(wfield) for wfield in window])
 

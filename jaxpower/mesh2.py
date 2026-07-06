@@ -880,16 +880,40 @@ def compute_smooth2_spectrum_window(window, edgesin: np.ndarray, ellsin: tuple=N
             else:
                 # fftlog
                 from .fftlog import SpectrumToCorrelation, CorrelationToSpectrum
+                from .cov2 import matrix_spline_interp, matrix_rebin
                 to_spectrum = CorrelationToSpectrum(s=next(iter(window)).coords('s'), ell=ell, check_level=1, lowring=False)
                 to_correlation = SpectrumToCorrelation(k=to_spectrum.k, ell=ellin, lowring=False)
 
+                # Smooth replacements for the sharp input/output binning:
+                # theory: instead of a raw 0/1 mask sampled at to_spectrum.k
+                # (crude/aliased when to_spectrum.k is coarse relative to an
+                # input bin -- a bin can even catch zero fftlog nodes), use
+                # the same spline-basis-function construction matrix_rebin
+                # uses internally (interpolate a unit spike at each input
+                # bin's center, smoothly extended to to_spectrum.k via cubic
+                # spline -- Min[:, idx] is that bin's smooth basis function).
+                # out: instead of jnp.interp at kout's bin centers, properly
+                # bin-average (weighted by k^2) onto kout's actual edges via
+                # matrix_rebin, as done throughout cov2.py/cov3.py.
+                kin_centers = jnp.mean(edgesin, axis=-1)
+                Min = matrix_spline_interp(kin_centers, to_spectrum.k, interp_order=3)
+                # matrix_spline_interp extrapolates via the spline's own
+                # boundary polynomial pieces outside [kin_centers.min(),
+                # kin_centers.max()] -- to_spectrum.k typically spans a much
+                # wider (log-spaced) range than the input bins, and cubic
+                # extrapolation over that gap explodes (observed up to
+                # ~1e15). Zero it outside the input bins' own range, matching
+                # the implicit zero of the boolean mask it replaces.
+                in_range = (to_spectrum.k >= edgesin.min()) & (to_spectrum.k <= edgesin.max())
+                Min = Min * in_range[:, None]
+                Mout = matrix_rebin(bin.edges, to_spectrum.k, wt=to_spectrum.k**2, interp_order=3)
+
                 def convolve(idx):
-                    edge = edgesin[idx]
-                    theory = (to_spectrum.k >= edge[0]) & (to_spectrum.k < edge[1])
+                    theory = Min[:, idx]
                     correlation = to_correlation(theory)[1]
                     #correlation = (ell == ellin) * correlation
                     correlation = correlation * Qs * to_correlation.s**wain
-                    return jnp.interp(kout, to_spectrum.k, to_spectrum(correlation)[1], left=0., right=0.)
+                    return Mout @ to_spectrum(correlation)[1]
 
                 tmp = jax.lax.map(convolve, jnp.arange(edgesin.shape[0]), batch_size=batch_size).T
 
