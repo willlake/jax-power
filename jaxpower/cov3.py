@@ -2632,6 +2632,13 @@ def compute_spectrum3_covariance(window2, window3, observable, theory=None, shot
                         _v = np.atleast_2d(np.asarray(_bl))
                         print(f"win33 {_nm} ell={ell} ellp={ellp}: max|.| = {np.abs(_v).max():.3e} diag head = {np.diag(_v)[:4]}")
                 block = block_PPP + block_BB + block_PT
+                if ip == i:
+                    # Same fix as the box-limit path's (c) double-closure term: the
+                    # closure-leg quadrature anchors its free-shape integral on one
+                    # of the two (here identical) triangles, so the diagonal block
+                    # is not exactly self-transpose-symmetric on its own -- average
+                    # away the quadrature-level mismatch.
+                    block = (block + block.T) / 2.
 
             else:
                 continue
