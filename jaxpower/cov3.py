@@ -1892,65 +1892,80 @@ def compute_spectrum3_covariance(window2, window3, observable, theory=None, shot
                                 if Pu_f is None or T_f is None:
                                     continue
 
-                            block_t = jnp.zeros((nbins, nbinsp))
-                            for m1, wm1 in zip(mu1_c, w_mu1_c):
-                                s1 = np.sqrt(max(1. - m1**2, 0.))
-                                k1hat = np.array([s1, 0., m1])
+                            # Vectorized over (m1, m2, branch) via jax.vmap: replaces a
+                            # 6x6x2 (mu1_c x mu2_c x branch) nested Python loop -- each
+                            # iteration previously dispatching its own small JAX ops --
+                            # with a single vmapped call. A < 1e-9 (measure-zero mu1 or
+                            # mu2 = +-1) is now a multiplicative mask instead of a
+                            # `continue`, mathematically equivalent since those nodes'
+                            # contribution is discarded either way.
+                            def _node_fn(m1, wm1, m2, wm2, branch):
+                                s1 = jnp.sqrt(jnp.clip(1. - m1**2, 0., None))
+                                s2 = jnp.sqrt(jnp.clip(1. - m2**2, 0., None))
+                                k1hat = jnp.stack([s1, jnp.zeros_like(s1), m1])
                                 k1vec_row = k1v[:, None] * k1hat[None, :]                  # (nbins, 3)
-                                for m2, wm2 in zip(mu2_c, w_mu2_c):
-                                    s2 = np.sqrt(max(1. - m2**2, 0.))
-                                    A = s1 * s2
-                                    if A < 1e-9:
-                                        continue   # measure-zero (mu1 or mu2 = +-1)
-                                    delta = A**2 - (mu12_nodes - m1 * m2)**2               # (nbins, nbinsp, nxc)
-                                    ok = valid_ab[..., None] & (delta > 0.)
-                                    delta_safe = np.where(ok, delta, 1.)
-                                    cosphi = (mu12_nodes - m1 * m2) / A
-                                    jac = np.where(ok, (w_xi_c[None, None, :] * half[..., None]) / np.sqrt(delta_safe), 0.)   # (nbins, nbinsp, nxc)
-                                    wmu = wm1 * wm2
+                                A = s1 * s2
+                                ok_A = A > 1e-9
+                                A_safe = jnp.where(ok_A, A, 1.)
 
-                                    for branch in (1., -1.):
-                                        sinphi = branch * np.sqrt(delta_safe) / A
-                                        k2hat = np.stack([s2 * cosphi, s2 * sinphi, np.full_like(cosphi, m2)], axis=-1)   # (nbins, nbinsp, nxc, 3)
-                                        k2vec = k2v[:, None, None, None] * k2hat                                          # (nbins, nbinsp, nxc, 3)
-                                        k1vec_b = jnp.broadcast_to(jnp.asarray(k1vec_row)[:, None, None, :], k2vec.shape)
-                                        k3vec = -(k1vec_b + k2vec)
-                                        k3mag = jnp.sqrt(jnp.sum(k3vec**2, axis=-1))
-                                        k3mag_safe = jnp.where(k3mag == 0., 1., k3mag)
-                                        khat3 = k3vec / k3mag_safe[..., None]
+                                delta = A_safe**2 - (mu12_nodes - m1 * m2)**2              # (nbins, nbinsp, nxc)
+                                ok = valid_ab[..., None] & (delta > 0.) & ok_A
+                                delta_safe = jnp.where(ok, delta, 1.)
+                                cosphi = (mu12_nodes - m1 * m2) / A_safe
+                                jac = jnp.where(ok, (w_xi_c[None, None, :] * half[..., None]) / jnp.sqrt(delta_safe), 0.)   # (nbins, nbinsp, nxc)
+                                wmu = wm1 * wm2
 
-                                        # Radial delta on the tied leg, W(k3, k'_lj) / Ntilde_mode(k3, k'_lj),
-                                        # evaluated at each node's own exact k3 (mirrors _delta_D); bin
-                                        # membership is already exact by construction (mu12 clipping), so
-                                        # only the 1/Ntilde_mode weighting is new relative to that helper.
-                                        ntilde = 4. * np.pi * k3mag_safe * coordp_lj[None, :, None] * dkp_lj[None, :, None] * volume / (2. * np.pi)**3
-                                        Dtie = jnp.asarray(ok) / ntilde                                                    # (nbins, nbinsp, nxc)
+                                sinphi = branch * jnp.sqrt(delta_safe) / A_safe
+                                k2hat = jnp.stack([s2 * cosphi, s2 * sinphi, jnp.full_like(cosphi, m2)], axis=-1)   # (nbins, nbinsp, nxc, 3)
+                                k2vec = k2v[:, None, None, None] * k2hat                                          # (nbins, nbinsp, nxc, 3)
+                                k1vec_b = jnp.broadcast_to(k1vec_row[:, None, None, :], k2vec.shape)
+                                k3vec = -(k1vec_b + k2vec)
+                                k3mag = jnp.sqrt(jnp.sum(k3vec**2, axis=-1))
+                                k3mag_safe = jnp.where(k3mag == 0., 1., k3mag)
+                                khat3 = k3vec / k3mag_safe[..., None]
 
-                                        k1hat_b = jnp.broadcast_to(jnp.asarray(k1hat)[None, None, None, :], k2vec.shape)
-                                        S_here = Sell(k1hat_b, k2hat)                                                      # (nbins, nbinsp, nxc)
+                                # Radial delta on the tied leg, W(k3, k'_lj) / Ntilde_mode(k3, k'_lj),
+                                # evaluated at each node's own exact k3 (mirrors _delta_D); bin
+                                # membership is already exact by construction (mu12 clipping), so
+                                # only the 1/Ntilde_mode weighting is new relative to that helper.
+                                ntilde = 4. * np.pi * k3mag_safe * coordp_lj[None, :, None] * dkp_lj[None, :, None] * volume / (2. * np.pi)**3
+                                Dtie = jnp.asarray(ok) / ntilde                                                    # (nbins, nbinsp, nxc)
 
-                                        if family == 'bb':
-                                            Au = Bu_f(k3vec, k1vec_b, k2vec)                                              # (nbins, nbinsp, nxc)
-                                        else:
-                                            Au = Pu_f(k3vec)
+                                k1hat_b = jnp.broadcast_to(k1hat[None, None, None, :], k2vec.shape)
+                                S_here = Sell(k1hat_b, k2hat)                                                      # (nbins, nbinsp, nxc)
 
-                                        wA = wmu * S_here * Au * jac * Dtie                                                # (nbins, nbinsp, nxc)
+                                if family == 'bb':
+                                    Au = Bu_f(k3vec, k1vec_b, k2vec)                                              # (nbins, nbinsp, nxc)
+                                else:
+                                    Au = Pu_f(k3vec)
 
-                                        for q0 in range(0, n2, max(n2 // nchunk, 1)):
-                                            qsl = slice(q0, min(q0 + max(n2 // nchunk, 1), n2))
-                                            nqc = qsl.stop - qsl.start
-                                            shp = (nbins, nbinsp, nxc, nqc)
-                                            tied = _bcast((s * khat3)[..., None, :], shp)
-                                            free = _bcast(dir2[None, None, None, qsl, :], shp)
-                                            clos = -(s * khat3)[..., None, :] - dir2[None, None, None, qsl, :]
-                                            legs = {lj: tied, ljf: free, 2: _bcast(clos, shp)}
-                                            if family == 'bb':
-                                                Bp = Bp_f(legs[lj], legs[r1[lj]], legs[r2[lj]])                          # (nbins, nbinsp, nxc, nqc)
-                                            else:
-                                                Ta1 = _bcast(jnp.asarray(k1vec_row)[:, None, None, None, :], shp)
-                                                Ta2 = _bcast(k2vec[..., None, :], shp)
-                                                Bp = T_f(Ta1, Ta2, legs[r1[lj]], legs[r2[lj]]) * _pt_qmask(Ta1, Ta2, legs[r1[lj]], legs[r2[lj]])
-                                            block_t = block_t + jnp.einsum('q,abn,abnq->ab', w_q[qsl], wA, Bp)
+                                wA = wmu * S_here * Au * jac * Dtie                                                # (nbins, nbinsp, nxc)
+
+                                block_node = 0.
+                                for q0 in range(0, n2, max(n2 // nchunk, 1)):
+                                    qsl = slice(q0, min(q0 + max(n2 // nchunk, 1), n2))
+                                    nqc = qsl.stop - qsl.start
+                                    shp = (nbins, nbinsp, nxc, nqc)
+                                    tied = _bcast((s * khat3)[..., None, :], shp)
+                                    free = _bcast(dir2[None, None, None, qsl, :], shp)
+                                    clos = -(s * khat3)[..., None, :] - dir2[None, None, None, qsl, :]
+                                    legs = {lj: tied, ljf: free, 2: _bcast(clos, shp)}
+                                    if family == 'bb':
+                                        Bp = Bp_f(legs[lj], legs[r1[lj]], legs[r2[lj]])                          # (nbins, nbinsp, nxc, nqc)
+                                    else:
+                                        Ta1 = _bcast(k1vec_row[:, None, None, None, :], shp)
+                                        Ta2 = _bcast(k2vec[..., None, :], shp)
+                                        Bp = T_f(Ta1, Ta2, legs[r1[lj]], legs[r2[lj]]) * _pt_qmask(Ta1, Ta2, legs[r1[lj]], legs[r2[lj]])
+                                    block_node = block_node + jnp.einsum('q,abn,abnq->ab', w_q[qsl], wA, Bp)
+                                return block_node                                                                  # (nbins, nbinsp)
+
+                            branch_c = np.array([1., -1.])
+                            m1_flat, m2_flat, branch_flat = (jnp.asarray(v.ravel()) for v in
+                                                             np.meshgrid(mu1_c, mu2_c, branch_c, indexing='ij'))
+                            wm1_flat, wm2_flat, _ = (jnp.asarray(v.ravel()) for v in
+                                                     np.meshgrid(w_mu1_c, w_mu2_c, branch_c, indexing='ij'))
+
+                            block_t = jax.vmap(_node_fn)(m1_flat, wm1_flat, m2_flat, wm2_flat, branch_flat).sum(axis=0)
 
                             if os.environ.get('COV3_BOX_DEBUG'):
                                 print(f"box33 (a) mu12 {family} lj={lj}: max|term| = {np.abs(np.asarray(norm_tie * block_t)).max():.3e}")
@@ -1989,65 +2004,75 @@ def compute_spectrum3_covariance(window2, window3, observable, theory=None, shot
                                 if Pu_f is None or T_f is None:
                                     continue
 
-                            block_t = jnp.zeros((nbins, nbinsp))
-                            for m1, wm1 in zip(mu1_c, w_mu1_c):
-                                s1 = np.sqrt(max(1. - m1**2, 0.))
-                                k1phat = np.array([s1, 0., m1])
+                            # Vectorized over (m1, m2, branch) via jax.vmap; see the mirror
+                            # comment in section (a) above.
+                            def _node_fn(m1, wm1, m2, wm2, branch):
+                                s1 = jnp.sqrt(jnp.clip(1. - m1**2, 0., None))
+                                s2 = jnp.sqrt(jnp.clip(1. - m2**2, 0., None))
+                                k1phat = jnp.stack([s1, jnp.zeros_like(s1), m1])
                                 k1pvec_row = k1pv[:, None] * k1phat[None, :]                  # (nbinsp, 3)
-                                for m2, wm2 in zip(mu2_c, w_mu2_c):
-                                    s2 = np.sqrt(max(1. - m2**2, 0.))
-                                    A = s1 * s2
-                                    if A < 1e-9:
-                                        continue   # measure-zero (mu1 or mu2 = +-1)
-                                    delta = A**2 - (mu12p_nodes - m1 * m2)**2               # (nbinsp, nbins, nxc)
-                                    ok = valid_ba[..., None] & (delta > 0.)
-                                    delta_safe = np.where(ok, delta, 1.)
-                                    cosphi = (mu12p_nodes - m1 * m2) / A
-                                    jac = np.where(ok, (w_xi_c[None, None, :] * halfp[..., None]) / np.sqrt(delta_safe), 0.)   # (nbinsp, nbins, nxc)
-                                    wmu = wm1 * wm2
+                                A = s1 * s2
+                                ok_A = A > 1e-9
+                                A_safe = jnp.where(ok_A, A, 1.)
 
-                                    for branch in (1., -1.):
-                                        sinphi = branch * np.sqrt(delta_safe) / A
-                                        k2phat = np.stack([s2 * cosphi, s2 * sinphi, np.full_like(cosphi, m2)], axis=-1)   # (nbinsp, nbins, nxc, 3)
-                                        k2pvec = k2pv[:, None, None, None] * k2phat                                          # (nbinsp, nbins, nxc, 3)
-                                        k1pvec_b = jnp.broadcast_to(jnp.asarray(k1pvec_row)[:, None, None, :], k2pvec.shape)
-                                        k3pvec = -(k1pvec_b + k2pvec)
-                                        k3pmag = jnp.sqrt(jnp.sum(k3pvec**2, axis=-1))
-                                        k3pmag_safe = jnp.where(k3pmag == 0., 1., k3pmag)
-                                        khat3p = k3pvec / k3pmag_safe[..., None]
+                                delta = A_safe**2 - (mu12p_nodes - m1 * m2)**2               # (nbinsp, nbins, nxc)
+                                ok = valid_ba[..., None] & (delta > 0.) & ok_A
+                                delta_safe = jnp.where(ok, delta, 1.)
+                                cosphi = (mu12p_nodes - m1 * m2) / A_safe
+                                jac = jnp.where(ok, (w_xi_c[None, None, :] * halfp[..., None]) / jnp.sqrt(delta_safe), 0.)   # (nbinsp, nbins, nxc)
+                                wmu = wm1 * wm2
 
-                                        # Radial delta on the tied leg (mirrors (a, li=2)):
-                                        # W(k3', k_li) / Ntilde_mode(k3', k_li), evaluated at
-                                        # each node's own exact k3'; bin membership is already
-                                        # exact by construction (mu12' clipping).
-                                        ntilde = 4. * np.pi * k3pmag_safe * coordu_li[None, :, None] * dku_li[None, :, None] * volume / (2. * np.pi)**3
-                                        Dtie = jnp.asarray(ok) / ntilde                                                    # (nbinsp, nbins, nxc)
+                                sinphi = branch * jnp.sqrt(delta_safe) / A_safe
+                                k2phat = jnp.stack([s2 * cosphi, s2 * sinphi, jnp.full_like(cosphi, m2)], axis=-1)   # (nbinsp, nbins, nxc, 3)
+                                k2pvec = k2pv[:, None, None, None] * k2phat                                          # (nbinsp, nbins, nxc, 3)
+                                k1pvec_b = jnp.broadcast_to(k1pvec_row[:, None, None, :], k2pvec.shape)
+                                k3pvec = -(k1pvec_b + k2pvec)
+                                k3pmag = jnp.sqrt(jnp.sum(k3pvec**2, axis=-1))
+                                k3pmag_safe = jnp.where(k3pmag == 0., 1., k3pmag)
+                                khat3p = k3pvec / k3pmag_safe[..., None]
 
-                                        k1phat_b = jnp.broadcast_to(jnp.asarray(k1phat)[None, None, None, :], k2pvec.shape)
-                                        Sp_here = Sellp(k1phat_b, k2phat)                                                  # (nbinsp, nbins, nxc)
+                                # Radial delta on the tied leg (mirrors (a, li=2)):
+                                # W(k3', k_li) / Ntilde_mode(k3', k_li), evaluated at
+                                # each node's own exact k3'; bin membership is already
+                                # exact by construction (mu12' clipping).
+                                ntilde = 4. * np.pi * k3pmag_safe * coordu_li[None, :, None] * dku_li[None, :, None] * volume / (2. * np.pi)**3
+                                Dtie = jnp.asarray(ok) / ntilde                                                    # (nbinsp, nbins, nxc)
 
-                                        if family == 'bb':
-                                            Ap = Bp_f(k3pvec, k1pvec_b, k2pvec)                                            # (nbinsp, nbins, nxc)
-                                        else:
-                                            Ap = Pu_f(k3pvec)
+                                k1phat_b = jnp.broadcast_to(k1phat[None, None, None, :], k2pvec.shape)
+                                Sp_here = Sellp(k1phat_b, k2phat)                                                  # (nbinsp, nbins, nxc)
 
-                                        wA = wmu * Sp_here * Ap * jac * Dtie                                               # (nbinsp, nbins, nxc)
+                                if family == 'bb':
+                                    Ap = Bp_f(k3pvec, k1pvec_b, k2pvec)                                            # (nbinsp, nbins, nxc)
+                                else:
+                                    Ap = Pu_f(k3pvec)
 
-                                        for q0 in range(0, n2, max(n2 // nchunk, 1)):
-                                            qsl = slice(q0, min(q0 + max(n2 // nchunk, 1), n2))
-                                            nqc = qsl.stop - qsl.start
-                                            shp = (nbinsp, nbins, nxc, nqc)
-                                            tied = _bcast((s * khat3p)[..., None, :], shp)
-                                            free = _bcast(dir2[None, None, None, qsl, :], shp)
-                                            clos = -(s * khat3p)[..., None, :] - dir2[None, None, None, qsl, :]
-                                            legs = {li: tied, lif: free, 2: _bcast(clos, shp)}
-                                            if family == 'bb':
-                                                Bu = Bu_f(legs[li], legs[r1[li]], legs[r2[li]])                          # (nbinsp, nbins, nxc, nqc)
-                                            else:
-                                                Tb1 = _bcast(jnp.asarray(k1pvec_row)[:, None, None, None, :], shp)
-                                                Tb2 = _bcast(k2pvec[..., None, :], shp)
-                                                Bu = T_f(legs[r1[li]], legs[r2[li]], Tb1, Tb2) * _pt_qmask(legs[r1[li]], legs[r2[li]], Tb1, Tb2)
-                                            block_t = block_t + jnp.einsum('q,ban,banq->ab', w_q[qsl], wA, Bu)
+                                wA = wmu * Sp_here * Ap * jac * Dtie                                               # (nbinsp, nbins, nxc)
+
+                                block_node = 0.
+                                for q0 in range(0, n2, max(n2 // nchunk, 1)):
+                                    qsl = slice(q0, min(q0 + max(n2 // nchunk, 1), n2))
+                                    nqc = qsl.stop - qsl.start
+                                    shp = (nbinsp, nbins, nxc, nqc)
+                                    tied = _bcast((s * khat3p)[..., None, :], shp)
+                                    free = _bcast(dir2[None, None, None, qsl, :], shp)
+                                    clos = -(s * khat3p)[..., None, :] - dir2[None, None, None, qsl, :]
+                                    legs = {li: tied, lif: free, 2: _bcast(clos, shp)}
+                                    if family == 'bb':
+                                        Bu = Bu_f(legs[li], legs[r1[li]], legs[r2[li]])                          # (nbinsp, nbins, nxc, nqc)
+                                    else:
+                                        Tb1 = _bcast(k1pvec_row[:, None, None, None, :], shp)
+                                        Tb2 = _bcast(k2pvec[..., None, :], shp)
+                                        Bu = T_f(legs[r1[li]], legs[r2[li]], Tb1, Tb2) * _pt_qmask(legs[r1[li]], legs[r2[li]], Tb1, Tb2)
+                                    block_node = block_node + jnp.einsum('q,ban,banq->ab', w_q[qsl], wA, Bu)
+                                return block_node                                                                  # (nbinsp, nbins)
+
+                            branch_c = np.array([1., -1.])
+                            m1_flat, m2_flat, branch_flat = (jnp.asarray(v.ravel()) for v in
+                                                             np.meshgrid(mu1_c, mu2_c, branch_c, indexing='ij'))
+                            wm1_flat, wm2_flat, _ = (jnp.asarray(v.ravel()) for v in
+                                                     np.meshgrid(w_mu1_c, w_mu2_c, branch_c, indexing='ij'))
+
+                            block_t = jax.vmap(_node_fn)(m1_flat, wm1_flat, m2_flat, wm2_flat, branch_flat).sum(axis=0)
 
                             if os.environ.get('COV3_BOX_DEBUG'):
                                 print(f"box33 (b) mu12 {family} li={li}: max|term| = {np.abs(np.asarray(norm_tie * block_t)).max():.3e}")
