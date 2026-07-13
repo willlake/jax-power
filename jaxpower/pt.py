@@ -692,7 +692,9 @@ class ProjectToSell:
         k1hat = unitvec(mu1, np.zeros_like(mu1)).reshape(-1, 3)
         k2hat = unitvec(mu2, phi2).reshape(-1, 3)
 
-        w = integ.w.ravel()
+        # Normalized angular measure dmu1 / 2 * dmu2 / 2 * dphi2 / (2 pi), so that a constant
+        # bispectrum projects to itself in the (0, 0, 0) multipole (raw integ.w sums to 8 pi)
+        w = integ.w.ravel() / (8. * np.pi)
         self.k1hat, self.k2hat = k1hat, k2hat
         self.w = np.array([w * get_N(*ell) * get_H(*ell)**2 * get_S(ell, z3=True)(k1hat, k2hat) for ell in self.ells])
 

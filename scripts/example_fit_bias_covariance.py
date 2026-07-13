@@ -181,8 +181,7 @@ def model_vector(params):
     p_poles = to_poles(P3d)                                                # (3, nk)
     B3d = spectrum3_redshift_tracer(jnp.asarray(k1vec_B), jnp.asarray(k2vec_B),
                                     pk_callable, pknow_callable, f=f, bias_params=bias_params)
-    # ProjectToSell weights are raw (triangle measure sums to 8 pi).
-    b_poles = to_Sell(B3d) / (8. * np.pi)                                  # (2, nbins)
+    b_poles = to_Sell(B3d)                                                 # (2, nbins)
     return jnp.concatenate([p_poles.ravel(), b_poles.ravel()])
 
 
