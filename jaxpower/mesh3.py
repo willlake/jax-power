@@ -1033,7 +1033,7 @@ def compute_fkp3_shotnoise(*fkps, bin=None, los: str | np.ndarray='z', resampler
         If 0 or 1, no interlacing correction.
         If > 1, order of interlacing correction.
         Typically, 3 gives reliable power spectrum estimation up to :math:`k \sim k_\mathrm{nyq}`.
-    compensate : bool, default=False
+    compensate : bool, default=True
         If ``True``, applies compensation to the mesh after painting.
     fields : tuple, list, optional
         Field identifiers; pass e.g. [0, 0, 1] if the first two fields share the same positions.

@@ -157,8 +157,7 @@ def _pole_transform(xout, pole, label, mode='forward'):
         xin_unraveled = list(pole.coords().values())
 
     # sugiyama basis: bessel transform on the first 2 ells
-    if is_edges:
-        weights = [BesselIntegral(xxin, xxout, ell=ell, method='exact' if is_edges else 'rect', mode=mode, edges=is_edges, volume=False).w for xxin, xxout, ell in zip(xin_unraveled, xout_unraveled, ell[:len(xout_unraveled)], strict=True)]
+    weights = [BesselIntegral(xxin, xxout, ell=ell, method='exact' if is_edges else 'rect', mode=mode, edges=is_edges, volume=False).w for xxin, xxout, ell in zip(xin_unraveled, xout_unraveled, ell[:len(xout_unraveled)], strict=True)]
     transformed = pole.value()
     if 'volume' in pole.values():
         volume = pole.values('volume')
