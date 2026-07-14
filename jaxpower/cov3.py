@@ -1782,7 +1782,13 @@ def compute_spectrum3_covariance(window2, window3, observable, theory=None, shot
                     # IR cutoff on the trispectrum's off-shell internal
                     # momenta (see make_pt_qmask): half the smallest k-bin
                     # edge.
-                    _pt_qmask = make_pt_qmask(0.5 * min(np.min(edges), np.min(edgesp)))
+                    # Floored at half the smallest bin width: binnings extending to k ~ 0
+                    # make the smallest edge (hence the cutoff) collapse, leaving the
+                    # squeezed-T degeneracies unmasked.
+                    _pt_qmin = max(0.5 * min(np.min(edges), np.min(edgesp)),
+                                   0.5 * min(np.min(np.asarray(edges)[..., 1] - np.asarray(edges)[..., 0]),
+                                             np.min(np.asarray(edgesp)[..., 1] - np.asarray(edgesp)[..., 0])))
+                    _pt_qmask = make_pt_qmask(_pt_qmin)
 
                     def _delta_D(vmag, spec_edges, spec_coords, spec_dk):
                         # W(vmag, k'_bin) / Ntilde_mode on the paired bins of
@@ -2499,6 +2505,12 @@ def compute_spectrum3_covariance(window2, window3, observable, theory=None, shot
                     # the scanned body, applied to T only, and the stored F
                     # table keeps its (u, p) shape.
                     phi_rel, wphi_rel = np.asarray(integ_phi.x()), np.asarray(integ_phi.w)
+                    # Offset the relative-azimuth grid (valid for a 2 pi-periodic integrand):
+                    # as in the box-limit tie terms, unoffset nodes rotate primed legs exactly
+                    # (anti-)parallel to unprimed ones at equal bin magnitudes, making internal
+                    # trispectrum pair sums cancel to machine zero -- unguarded squeezed-T
+                    # configurations that dominate the sum.
+                    phi_rel = phi_rel + np.pi / 17.
                     nphi = len(phi_rel)
                     cosp, sinp = jnp.asarray(np.cos(phi_rel)), jnp.asarray(np.sin(phi_rel))
                     # Rotated primed legs, (3 legs, nphi, nside, nbinsp, 3).
@@ -2510,7 +2522,13 @@ def compute_spectrum3_covariance(window2, window3, observable, theory=None, shot
                     # IR cutoff on the trispectrum's off-shell internal
                     # momenta (see make_pt_qmask): half the smallest k-bin
                     # edge.
-                    _pt_qmask = make_pt_qmask(0.5 * min(np.min(edges), np.min(edgesp)))
+                    # Floored at half the smallest bin width: binnings extending to k ~ 0
+                    # make the smallest edge (hence the cutoff) collapse, leaving the
+                    # squeezed-T degeneracies unmasked.
+                    _pt_qmin = max(0.5 * min(np.min(edges), np.min(edgesp)),
+                                   0.5 * min(np.min(np.asarray(edges)[..., 1] - np.asarray(edges)[..., 0]),
+                                             np.min(np.asarray(edgesp)[..., 1] - np.asarray(edgesp)[..., 0])))
+                    _pt_qmask = make_pt_qmask(_pt_qmin)
 
                     def _pt_point(u, p):
                         # The (ell, ellp)-independent integrand
