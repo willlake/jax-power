@@ -66,7 +66,7 @@ table, table_now = prepare_spectrum2_redshift_tracer(k_table, pk_callable, pknow
 
 # Fiducial bias parameters; (b1, b2) are fitted below, the rest stay fixed.
 fid_bias = {"b1": 2.0, "b2": 0.5, "bs": -0.3, "b3nl": 0.1,
-            "c1": 0.1, "c2": 0.2, "X_FoG": 2., "Bshot": 0.1, "Pshot": 0.1}
+            "c1": 0.1, "c2": 0.2, "X_FoG": 2., "snb0": 0.1, "sn0": 0.1}
 
 
 def get_bias(params):

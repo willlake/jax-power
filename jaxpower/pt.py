@@ -720,7 +720,7 @@ def spectrum3_redshift_tracer(k1vec, k2vec, pk_callable, pknow_callable, f, bias
     bias_params : dict
         Mapping field -> parameters.
         Each entry can be either a dict with keys
-        ('b1', 'b2', 'bs', 'c1', 'c2', 'Bshot', 'Pshot', 'X_FoG')
+        ('b1', 'b2', 'bs', 'c1', 'c2', 'snb0', 'sn0', 'X_FoG')
         or a tuple/list in that order.
     pk_callable : callable
         Callable returning the linear power spectrum P(k) for a given k.
@@ -747,7 +747,7 @@ def spectrum3_redshift_tracer(k1vec, k2vec, pk_callable, pknow_callable, f, bias
     def _get_bias_params(field, names=None):
         pars = bias_params[field]
         if names is None:
-            names = ['b1', 'b2', 'bs', 'c1', 'c2', 'Bshot', 'Pshot', 'X_FoG']
+            names = ['b1', 'b2', 'bs', 'c1', 'c2', 'snb0', 'sn0', 'X_FoG']
         if isinstance(names, str):
             return pars[names]
         return [pars[name] for name in names]
@@ -827,8 +827,8 @@ def spectrum3_redshift_tracer(k1vec, k2vec, pk_callable, pknow_callable, f, bias
     W = fog_damping((k1 * mu1, X1), (k2 * mu2, X2), (k3 * mu3, X3), f=f, sigma2v=sigma2v, damping=damping)
 
     def _shot_leg(field, k, mu, Z1eft, pkIR):
-        b1, Bshot, Pshot = _get_bias_params(field, ['b1', 'Bshot', 'Pshot'])
-        return (b1 * Bshot + 2. * Pshot * f * mu**2) * Z1eft * pkIR
+        b1, snb0, sn0 = _get_bias_params(field, ['b1', 'snb0', 'sn0'])
+        return (b1 * snb0 + 2. * sn0 * f * mu**2) * Z1eft * pkIR
 
     shot = _shot_leg(a, k1, mu1, Z1eft1, pkIR1) + _shot_leg(b, k2, mu2, Z1eft2, pkIR2) + _shot_leg(c, k3, mu3, Z1eft3, pkIR3) + shot**2
 
@@ -873,7 +873,7 @@ def spectrum4_redshift_tracer(k1vec, k2vec, k3vec, pk_callable, pknow_callable, 
     def _get_bias_params(field, names=None):
         pars = bias_params[field]
         if names is None:
-            names = ['b1', 'b2', 'bs', 'c1', 'c2', 'Bshot', 'Pshot', 'X_FoG']
+            names = ['b1', 'b2', 'bs', 'c1', 'c2', 'snb0', 'sn0', 'X_FoG']
         if isinstance(names, str):
             return pars[names]
         return [pars[name] for name in names]
@@ -1153,16 +1153,16 @@ def spectrum4_redshift_tracer(k1vec, k2vec, k3vec, pk_callable, pknow_callable, 
     W = fog_damping((k1 * mu1, X1), (k2 * mu2, X2), (k3 * mu3, X3), (k4 * mu4, X4), f=f, sigma2v=sigma2v, damping=damping)
 
     def _shot_leg(field, k, mu, Z1eft, pkIR):
-        b1, Bshot, Pshot = _get_bias_params(field, ['b1', 'Bshot', 'Pshot'])
-        return (b1 * Bshot + 2. * Pshot * f * mu**2) * Z1eft * pkIR
+        b1, snb0, sn0 = _get_bias_params(field, ['b1', 'snb0', 'sn0'])
+        return (b1 * snb0 + 2. * sn0 * f * mu**2) * Z1eft * pkIR
 
     leg1 = _shot_leg(a, k1, mu1, _Z1eff(a, k1, mu1), _IR_pk(k1, mu1))
     leg2 = _shot_leg(b, k2, mu2, _Z1eff(b, k2, mu2), _IR_pk(k2, mu2))
     leg3 = _shot_leg(c, k3, mu3, _Z1eff(c, k3, mu3), _IR_pk(k3, mu3))
     leg4 = _shot_leg(d, k4, mu4, _Z1eff(d, k4, mu4), _IR_pk(k4, mu4))
 
-    Pshot1, Pshot2, Pshot3, Pshot4 = [_get_bias_params(field, 'Pshot') for field in fields]
+    sn0_1, sn0_2, sn0_3, sn0_4 = [_get_bias_params(field, 'sn0') for field in fields]
     shot = 0.25 * (leg1 * leg2 + leg1 * leg3 + leg1 * leg4 + leg2 * leg3 + leg2 * leg4 + leg3 * leg4)\
-    + 0.5 * (leg1 * Pshot1 + leg2 * Pshot2 + leg3 * Pshot3 + leg4 * Pshot4) + shot
+    + 0.5 * (leg1 * sn0_1 + leg2 * sn0_2 + leg3 * sn0_3 + leg4 * sn0_4) + shot
 
     return W * trispec_tree + shot

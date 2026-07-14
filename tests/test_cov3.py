@@ -26,7 +26,7 @@ def get_theory(kmax=0.5):
 
     f = 0.8
     bias_params = {0: {"b1": 2.0, "b2": 0.5, "bs": -0.3, "b3nl": 0.1,
-                       "c1": 0.1, "c2": 0.2, "X_FoG": 2., "Bshot": 0.1, "Pshot": 0.1}}
+                       "c1": 0.1, "c2": 0.2, "X_FoG": 2., "snb0": 0.1, "sn0": 0.1}}
 
     def pk_callable(q):
         return jnp.interp(q, kt, pkt)
