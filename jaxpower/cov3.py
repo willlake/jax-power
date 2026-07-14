@@ -1424,12 +1424,15 @@ def compute_spectrum3_covariance(window2, window3, observable, theory=None, shot
                 # ---- Per-(ell, ellp) assembly (cheap) ----
                 mu_s, w_mu = pre['mu_s'], pre['w_mu']
                 wS_tri = jnp.asarray(pre['w_tri']) * Sp(pre['hat1'], pre['hat2'])
-                # 2 (2l+1) N H^2 acting on normalized measures (see
+                # (2l+1) N H^2 acting on normalized measures (see
                 # _cov3_math.tex): /2 for the spectrum side's dmu/2 and
                 # /(8 pi) for the triangle side's (dmu1/2)(dmu2 dphi2/4pi) --
                 # the quadrature weights below are raw (summing to 2 and
-                # 8 pi respectively).
-                prefPB = 2. * (2 * ell + 1) * get_N(*ellp) * get_H(*ellp)**2 / (2. * 8. * np.pi)
+                # 8 pi respectively). As in the periodic-box branch, the
+                # reference's leading 2 counts the two Wick routes, which
+                # pb_terms already enumerates explicitly (+/- signs) --
+                # keeping it double-counted the whole PB block.
+                prefPB = (2 * ell + 1) * get_N(*ellp) * get_H(*ellp)**2 / (2. * 8. * np.pi)
                 block = 0.
                 for entry in pre['terms']:
                     tab, sign = entry['tab'], entry['sign']
@@ -1615,9 +1618,11 @@ def compute_spectrum3_covariance(window2, window3, observable, theory=None, shot
                 mu_s, w_mu = pre['mu_s'], pre['w_mu']
                 wS_tri = jnp.asarray(pre['w_tri']) * S(pre['hat1'], pre['hat2'])
                 # Mirror of the PB normalization (Cov^BP is the PB
-                # transpose): 2 (2l'+1) N H^2 on normalized measures, /2 for
-                # the spectrum side and /(8 pi) for the triangle side.
-                prefBP = 2. * (2 * ellp + 1) * get_N(*ell) * get_H(*ell)**2 / (2. * 8. * np.pi)
+                # transpose): (2l'+1) N H^2 on normalized measures, /2 for
+                # the spectrum side and /(8 pi) for the triangle side; the
+                # reference's leading 2 (the two Wick routes) is already
+                # enumerated explicitly in the terms.
+                prefBP = (2 * ellp + 1) * get_N(*ell) * get_H(*ell)**2 / (2. * 8. * np.pi)
                 block = 0.
                 for entry in pre['terms']:
                     tab, sign = entry['tab'], entry['sign']
