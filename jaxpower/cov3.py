@@ -903,6 +903,13 @@ def compute_spectrum3_covariance(window2, window3, observable, theory=None, shot
 
     qw_ells = [0, 2, 4]        # compute_QW_AB's default window multipoles
     w3_ells = [(0, 0, 0)]      # compute_QW_ABC's default
+    if use_window_kernels and window3 is not None:
+        # Use every Sugiyama multipole the 3-point window provides: they enter the
+        # BB-block Gaussian (PPP) term, and a monopole-only window nearly cancels
+        # the Gaussian variance of anisotropic bispectrum multipoles such as (2, 0, 2).
+        _w3_ells = sorted({tuple(label['ells']) for label, _ in window3.items(level=None) if 'ells' in label})
+        if _w3_ells:
+            w3_ells = _w3_ells
 
     def _qw_tables(win, rowspec, colspec, fields1, fields2, rows_shape=None, cols_shape=None, F_u=None, F_p=None):
         """Q_W(k, k') multipole tables for one pair of covariance legs, with
@@ -1343,6 +1350,24 @@ def compute_spectrum3_covariance(window2, window3, observable, theory=None, shot
                     nbinsp_bisp = coordsp.shape[-1]
                     pre['w_tri'] = w_tri
 
+                    # Dedicated dense azimuthal quadrature for the closure-leg (side == 2)
+                    # tie: on the shared coarse grid the smooth k3 = |k1 + k2| band collapses
+                    # onto the discrete node values (the survey window Q_W(k, k3) is much
+                    # narrower than the node spacing), imprinting spurious ridges at
+                    # k = alpha_node k' with alpha_node = sqrt(2 + 2 mu12(node)). phi2 is the
+                    # right variable to refine: the integrand is smooth in it (no
+                    # substitution-jacobian endpoint singularity) and the induced mu12
+                    # sampling densifies automatically near the band edges (|sin phi2| -> 0).
+                    nphi_closure = int(os.environ.get('COV3_CLOSURE_PHI_SIZE', 128))
+                    integ_tri_c = IntegralND(mu1=integ_mu, mu2=integ_mu, phi2=integration(0., 2. * np.pi, size=nphi_closure))
+                    _tri_c = integ_tri_c.x(['mu1', 'mu2', 'phi2'], sparse=False)
+                    mu1_c, mu2_c, phi2_c = (np.ravel(arr) for arr in _tri_c)
+                    w_c = np.ravel(integ_tri_c.w)
+                    ntri_c = len(w_c)
+                    pre['w_c'] = w_c
+                    pre['hat1_c'] = jax.vmap(lambda m: unitvec(m, jnp.zeros_like(m)))(jnp.asarray(mu1_c))    # (ntri_c, 3)
+                    pre['hat2_c'] = jax.vmap(unitvec)(jnp.asarray(mu2_c), jnp.asarray(phi2_c))               # (ntri_c, 3)
+
                     def _pb_oriented(side, mu1, mu2, phi2):
                         # Return (q, r1, r2), where q is the contracted
                         # bispectrum side (the leg replaced by Q_W(p, q)) and
@@ -1394,7 +1419,11 @@ def compute_spectrum3_covariance(window2, window3, observable, theory=None, shot
                         # field-label order (does not affect P/B, already resolved above).
                         fieldsP, fieldsB = tuple(sorted(fieldsP)), tuple(sorted(fieldsB))
                         _fn = lambda m1, m2, p2: _pb_oriented(side, m1, m2, p2)
-                        qnorms, qhats, kvecs = jax.vmap(_fn)(jnp.asarray(mu1_s), jnp.asarray(mu2_s), jnp.asarray(phi2_s))
+                        if side == 2:
+                            # Closure-leg tie: dense phi2 nodes (see above)
+                            qnorms, qhats, kvecs = jax.vmap(_fn)(jnp.asarray(mu1_c), jnp.asarray(mu2_c), jnp.asarray(phi2_c))
+                        else:
+                            qnorms, qhats, kvecs = jax.vmap(_fn)(jnp.asarray(mu1_s), jnp.asarray(mu2_s), jnp.asarray(phi2_s))
                         qn, qh = qnorms[0], qhats[0]                    # (ntri, nbinsp[, 3]) or (ntri[, 3]) for side < 2
                         qvec, r1vec, r2vec = kvecs
                         PB_u = P(qvec) * B(qvec, r1vec, r2vec)          # (ntri, nbinsp)
@@ -1404,10 +1433,10 @@ def compute_spectrum3_covariance(window2, window3, observable, theory=None, shot
                             # its literal values; its khat . n is
                             # bin-dependent. Absorb L_e2(mu_q) x P x B into
                             # the table's node axis.
-                            muq = qh[..., 2]                            # (ntri, nbinsp)
+                            muq = qh[..., 2]                            # (ntri_c, nbinsp)
                             F_p = {e2: get_legendre(e2)(muq) * PB_u for e2 in qw_ells}
                             entry['tab'] = _qw_tables(window2, edges, np.asarray(jnp.ravel(qn)), fieldsP, fieldsB,
-                                                      cols_shape=(ntri, nbinsp_bisp), F_p=F_p)
+                                                      cols_shape=(ntri_c, nbinsp_bisp), F_p=F_p)
                         else:
                             # edgesp is bin-major, shape (nbins, 2, 2):
                             # axis 1 selects the leg. The contracted leg's
@@ -1424,6 +1453,7 @@ def compute_spectrum3_covariance(window2, window3, observable, theory=None, shot
                 # ---- Per-(ell, ellp) assembly (cheap) ----
                 mu_s, w_mu = pre['mu_s'], pre['w_mu']
                 wS_tri = jnp.asarray(pre['w_tri']) * Sp(pre['hat1'], pre['hat2'])
+                wS_closure = jnp.asarray(pre['w_c']) * Sp(pre['hat1_c'], pre['hat2_c'])
                 # (2l+1) N H^2 acting on normalized measures (see
                 # _cov3_math.tex): /2 for the spectrum side's dmu/2 and
                 # /(8 pi) for the triangle side's (dmu1/2)(dmu2 dphi2/4pi) --
@@ -1440,7 +1470,7 @@ def compute_spectrum3_covariance(window2, window3, observable, theory=None, shot
                         # Spectrum-side scalar: sum_mu w L_ell(mu) L_e1(sign mu).
                         lsc = np.sum(w_mu * leg(mu_s) * get_legendre(e1)(sign * mu_s))
                         if entry['side'] == 2:
-                            block = block + prefPB * lsc * jnp.einsum('aub,u->ab', tab['e1', e1], wS_tri)
+                            block = block + prefPB * lsc * jnp.einsum('aub,u->ab', tab['e1', e1], wS_closure)
                         else:
                             for e2 in qw_ells:
                                 cvec = (wS_tri * get_legendre(e2)(jnp.asarray(entry['muq']))) @ entry['PB_u']   # (nbinsp,)
@@ -1545,6 +1575,17 @@ def compute_spectrum3_covariance(window2, window3, observable, theory=None, shot
                     nbins_bisp = coords.shape[-1]
                     pre['w_tri'] = w_tri
 
+                    # Dense closure-leg azimuthal quadrature; see the PB block.
+                    nphi_closure = int(os.environ.get('COV3_CLOSURE_PHI_SIZE', 128))
+                    integ_tri_c = IntegralND(mu1=integ_mu, mu2=integ_mu, phi2=integration(0., 2. * np.pi, size=nphi_closure))
+                    _tri_c = integ_tri_c.x(['mu1', 'mu2', 'phi2'], sparse=False)
+                    mu1_c, mu2_c, phi2_c = (np.ravel(arr) for arr in _tri_c)
+                    w_c = np.ravel(integ_tri_c.w)
+                    ntri_c = len(w_c)
+                    pre['w_c'] = w_c
+                    pre['hat1_c'] = jax.vmap(lambda m: unitvec(m, jnp.zeros_like(m)))(jnp.asarray(mu1_c))    # (ntri_c, 3)
+                    pre['hat2_c'] = jax.vmap(unitvec)(jnp.asarray(mu2_c), jnp.asarray(phi2_c))               # (ntri_c, 3)
+
                     def _bp_oriented(side, mu1, mu2, phi2):
                         # Return (q, r1, r2), where q is the contracted side
                         # of the first/bispectrum observable and r1, r2 are
@@ -1587,7 +1628,11 @@ def compute_spectrum3_covariance(window2, window3, observable, theory=None, shot
                         # field-label order (does not affect P/B, already resolved above).
                         fieldsP, fieldsB = tuple(sorted(fieldsP)), tuple(sorted(fieldsB))
                         _fn = lambda m1, m2, p2: _bp_oriented(side, m1, m2, p2)
-                        qnorms, qhats, kvecs = jax.vmap(_fn)(jnp.asarray(mu1_s), jnp.asarray(mu2_s), jnp.asarray(phi2_s))
+                        if side == 2:
+                            # Closure-leg tie: dense phi2 nodes (see above)
+                            qnorms, qhats, kvecs = jax.vmap(_fn)(jnp.asarray(mu1_c), jnp.asarray(mu2_c), jnp.asarray(phi2_c))
+                        else:
+                            qnorms, qhats, kvecs = jax.vmap(_fn)(jnp.asarray(mu1_s), jnp.asarray(mu2_s), jnp.asarray(phi2_s))
                         qn, qh = qnorms[0], qhats[0]
                         qvec, r1vec, r2vec = kvecs
                         PB_u = P(qvec) * B(qvec, r1vec, r2vec)          # (ntri, nbins)
@@ -1597,10 +1642,10 @@ def compute_spectrum3_covariance(window2, window3, observable, theory=None, shot
                             # its literal values; its khat . n is
                             # bin-dependent. Absorb L_e1(mu_q) x P x B into
                             # the table's node axis.
-                            muq = qh[..., 2]                            # (ntri, nbins)
+                            muq = qh[..., 2]                            # (ntri_c, nbins)
                             F_u = {e1: get_legendre(e1)(muq) * PB_u for e1 in qw_ells}
                             entry['tab'] = _qw_tables(window2, np.asarray(jnp.ravel(qn)), edgesp, fieldsP, fieldsB,
-                                                      rows_shape=(ntri, nbins_bisp), F_u=F_u)
+                                                      rows_shape=(ntri_c, nbins_bisp), F_u=F_u)
                         else:
                             # edges is bin-major, shape (nbins, 2, 2):
                             # axis 1 selects the leg. The contracted leg's
@@ -1617,6 +1662,7 @@ def compute_spectrum3_covariance(window2, window3, observable, theory=None, shot
                 # ---- Per-(ell, ellp) assembly (cheap) ----
                 mu_s, w_mu = pre['mu_s'], pre['w_mu']
                 wS_tri = jnp.asarray(pre['w_tri']) * S(pre['hat1'], pre['hat2'])
+                wS_closure = jnp.asarray(pre['w_c']) * S(pre['hat1_c'], pre['hat2_c'])
                 # Mirror of the PB normalization (Cov^BP is the PB
                 # transpose): (2l'+1) N H^2 on normalized measures, /2 for
                 # the spectrum side and /(8 pi) for the triangle side; the
@@ -1630,7 +1676,7 @@ def compute_spectrum3_covariance(window2, window3, observable, theory=None, shot
                         # Spectrum-side scalar: sum_mu w L_ellp(mu) L_e2(sign mu).
                         rsc = np.sum(w_mu * legp(mu_s) * get_legendre(e2)(sign * mu_s))
                         if entry['side'] == 2:
-                            block = block + prefBP * rsc * jnp.einsum('uab,u->ab', tab['e2', e2], wS_tri)
+                            block = block + prefBP * rsc * jnp.einsum('uab,u->ab', tab['e2', e2], wS_closure)
                         else:
                             for e1 in qw_ells:
                                 rvec = (wS_tri * get_legendre(e1)(jnp.asarray(entry['muq']))) @ entry['PB_u']   # (nbins,)
