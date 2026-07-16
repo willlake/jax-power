@@ -7,7 +7,7 @@ from jax import numpy as jnp
 
 from .mesh import MeshAttrs, split_particles
 from .mesh2 import get_smooth2_window_bin_attrs
-from .mesh3 import BinMesh3CorrelationPoles, compute_mesh3, FKPField, get_sugiyama_window_convolution_coeffs, get_smooth3_window_bin_attrs
+from .mesh3 import BinMesh3CorrelationPoles, compute_mesh3, FKPField, get_sugiyama_window_convolution_coeffs, get_sugiyama_covariance_window_convolution_coeffs, get_smooth3_window_bin_attrs
 from .types import CovarianceMatrix, ObservableTree
 from .utils import wigner_3j, get_legendre, legendre_product
 from .pt import integration, IntegralND, get_S
@@ -365,9 +365,19 @@ def _hankel_matrix(s, ell, cache=None):
 def compute_spectrum3_covariance_window_block(window3, kedges, kpedges,
                                               ell, ellin,
                                               fields1=None, fields2=None, fields3=None,
-                                              cache=None, batch_size=None):
+                                              cache=None, batch_size=None,
+                                              paxes=(0, 1), kp_points=None):
     """
     Compute one smooth covariance-window block W_{ell,ellin}(k1,k2;k1',k2').
+
+    The unprimed radial axes always carry the (binned) k1, k2 legs. The
+    primed radial axes are selected by ``paxes``: entry 0 or 1 rebins over
+    the corresponding ``kpedges`` column (which primed *binned* leg pairs
+    with each separation axis depends on the Wick permutation), while entry
+    2 point-evaluates that axis at the primed *closure*-leg magnitudes
+    ``kp_points`` (shape ``(nnodes, nbinsp)``, node- and bin-dependent, as
+    in the box path's exact substitution). With a points axis the result has
+    shape ``(n, npx, nnodes)`` instead of ``(n, npx)``.
     """
     if cache is None:
         cache = {}
@@ -437,7 +447,11 @@ def compute_spectrum3_covariance_window_block(window3, kedges, kpedges,
 
     window3 = get_window_field(window3, fields1, fields2, fields3)
 
-    wcoeffs = get_sugiyama_window_convolution_coeffs(ell, ellin)
+    # Covariance-kernel coefficients (the C^{lambda}_{L1L1'L2L2'} pairing of
+    # _cov3_math.tex, N = 0) -- NOT the mean-convolution coefficients of
+    # get_sugiyama_window_convolution_coeffs: the monopole window must feed
+    # each diagonal (ell, ell) channel with the Parseval weight 1/||S_ell||^2.
+    wcoeffs = get_sugiyama_covariance_window_convolution_coeffs(ell, ellin)
 
     if not wcoeffs:
         return np.zeros((n, npx))
@@ -457,16 +471,35 @@ def compute_spectrum3_covariance_window_block(window3, kedges, kpedges,
     interp_order = 3
     Mk1 = matrix_rebin(edges[:, 0, :], k1_fftlog, wt=k1_fftlog**2, interp_order=interp_order, cache=rebin_cache)
     Mk2 = matrix_rebin(edges[:, 1, :], k2_fftlog, wt=k2_fftlog**2, interp_order=interp_order, cache=rebin_cache)
-    Mk1p = matrix_rebin(edgesp[:, 0, :], k1p_fftlog, wt=k1p_fftlog**2, interp_order=interp_order, cache=rebin_cache)
-    Mk2p = matrix_rebin(edgesp[:, 1, :], k2p_fftlog, wt=k2p_fftlog**2, interp_order=interp_order, cache=rebin_cache)
 
     # Fuse the bin-rebinning into the forward-transform matrices before
     # contracting against Qs, so the (n_s1, n_s2) ~ 1000x1000 grid is never
     # expanded into a dense 4D tensor. Rows/columns are paired bins: bin a
     # applies its own k1-rebin on the s1 axis AND its own k2-rebin on the s2
     # axis.
-    R1, R2, R1p, R2p = Mk1 @ H1, Mk2 @ H2, Mk1p @ H1p, Mk2p @ H2p
+    R1, R2 = Mk1 @ H1, Mk2 @ H2
 
+    def primed_R(axis, kp_fftlog, Hp):
+        spec = paxes[axis]
+        if spec == 2:
+            # Closure leg: point-evaluate the transform at the node- and
+            # bin-dependent magnitudes (n_nodes, npx), as in the box path.
+            pts = jnp.reshape(jnp.asarray(kp_points), (-1,))
+            # Clamp to the FFTlog grid: k3' -> 0 at antiparallel quadrature
+            # nodes, and polynomial spline extrapolation there is unsafe.
+            pts = jnp.clip(pts, jnp.min(kp_fftlog), jnp.max(kp_fftlog))
+            interp = matrix_spline_interp(kp_fftlog, pts, interp_order, cache=hankel_cache)
+            return jnp.reshape(interp @ Hp, (np.shape(kp_points)[0], npx, -1))  # (n_nodes, npx, n_s)
+        Mkp = matrix_rebin(edgesp[:, spec, :], kp_fftlog, wt=kp_fftlog**2, interp_order=interp_order, cache=rebin_cache)
+        return Mkp @ Hp
+
+    R1p = primed_R(0, k1p_fftlog, H1p)
+    R2p = primed_R(1, k2p_fftlog, H2p)
+
+    if np.ndim(R1p) == 3:
+        return jnp.einsum('as,at,st,nbs,bt->abn', R1, R2, Qs, R1p, R2p, optimize=True)
+    if np.ndim(R2p) == 3:
+        return jnp.einsum('as,at,st,bs,nbt->abn', R1, R2, Qs, R1p, R2p, optimize=True)
     return jnp.einsum('as,at,st,bs,bt->ab', R1, R2, Qs, R1p, R2p, optimize=True)
 
 
@@ -902,14 +935,32 @@ def compute_spectrum3_covariance(window2, window3, observable, theory=None, shot
         return wigner_3j(ell1, ell2, ell3, 0, 0, 0)
 
     qw_ells = [0, 2, 4]        # compute_QW_AB's default window multipoles
-    w3_ells = [(0, 0, 0)]      # compute_QW_ABC's default
+    w3_ells = [(0, 0, 0)]      # PPP kernel S-basis expansion channels
     if use_window_kernels and window3 is not None:
-        # Use every Sugiyama multipole the 3-point window provides: they enter the
-        # BB-block Gaussian (PPP) term, and a monopole-only window nearly cancels
-        # the Gaussian variance of anisotropic bispectrum multipoles such as (2, 0, 2).
-        _w3_ells = sorted({tuple(label['ells']) for label, _ in window3.items(level=None) if 'ells' in label})
-        if _w3_ells:
-            w3_ells = _w3_ells
+        # S-basis channels for the angular reconstruction of the 4-point PPP
+        # kernel. These are INDEPENDENT of which multipoles the 3-point
+        # window stores (get_w_rect zero-fills missing ones, and the stored
+        # monopole alone feeds every diagonal channel with weight
+        # 1/||S_ell||^2): tying this list to the stored multipoles nearly
+        # cancels the Gaussian variance of anisotropic bispectrum poles such
+        # as (2, 0, 2). The list must also be closed under (ell1, ell2)
+        # exchange -- the primed-side S is evaluated at permuted legs, so a
+        # mirror-asymmetric list (e.g. sorted storage representatives)
+        # unbalances the 6-permutation Wick sum. The default lmax = 2 covers
+        # the standard poles ((0,0,0), (2,0,2), ..., (2,2,4)) and is the
+        # largest alias-free order at the default COV3_QUAD_SIZE = 6: on that
+        # quadrature, ell >= 3 channels are NOT numerically orthogonal to
+        # lower ones (e.g. <S_000 S_442> ~ 0.11), so raise
+        # COV3_PPP_CHANNEL_LMAX and COV3_QUAD_SIZE together.
+        _lmax = int(os.environ.get('COV3_PPP_CHANNEL_LMAX', 2))
+        w3_ells = []
+        for _l1, _l2 in itertools.product(range(_lmax + 1), repeat=2):
+            for _L in range(abs(_l1 - _l2), _l1 + _l2 + 1, 2):
+                if (_l1 + _l2 + _L) % 2 or _L % 2:
+                    continue
+                if abs(wigner_3j(_l1, _l2, _L, 0, 0, 0)) < 1e-12:
+                    continue
+                w3_ells.append((_l1, _l2, _L))
 
     def _qw_tables(win, rowspec, colspec, fields1, fields2, rows_shape=None, cols_shape=None, F_u=None, F_p=None):
         """Q_W(k, k') multipole tables for one pair of covariance legs, with
@@ -1758,6 +1809,12 @@ def compute_spectrum3_covariance(window2, window3, observable, theory=None, shot
                         # provides no power spectrum (e.g. B-only theory).
                         if any(P is None for P in Ps):
                             continue
+                        # Debug knob: restrict to arm-only ((0,1)/(1,0)) or
+                        # closure-only (a primed/unprimed closure leg is tied)
+                        # pairings, to compare against the windowed path.
+                        _sel = os.environ.get('COV3_PPP_TERMS')
+                        if _sel and (('closure' in _sel) != (2 in (s1, s2))):
+                            continue
                         # sigma[m]: which primed leg is tied to unprimed leg
                         # m by the deltas (m = 0, 1 explicitly; leg 2 by
                         # closure); siginv: the unprimed leg each primed leg
@@ -2403,10 +2460,29 @@ def compute_spectrum3_covariance(window2, window3, observable, theory=None, shot
                         ((P_acp, P_bbp, P_cap), ((a, cp), (b, bp), (c, ap)), (2, 1)),
                     ]
                     pre['ppp'] = []
+                    # Blocks depend only on (edges, channel pair, sorted
+                    # fields), not on the permutation entry: cache across the
+                    # 6 entries (and across observable blocks). Zero blocks
+                    # (channel pairs the stored multipoles do not feed) are
+                    # dropped from the assembly. The S closures are cached
+                    # too: get_S lambdifies spherical harmonics on each call.
+                    ppp_block_cache = cache.setdefault('ppp_blocks', {})
+                    _S_closures = {}
+
+                    def _get_S_cached(ell):
+                        if ell not in _S_closures:
+                            _S_closures[ell] = get_S(ell, z3=True)
+                        return _S_closures[ell]
+
+                    _Su_cache, _Sp_cache = {}, {}
                     for (Ps, w3_fields, (s1, s2)) in ppp_terms:
                         # As for the BB / PT families: skip when the theory
                         # provides no power spectrum (e.g. B-only theory).
                         if any(P is None for P in Ps):
+                            continue
+                        # Debug knob, see the box-path ppp_terms loop.
+                        _sel = os.environ.get('COV3_PPP_TERMS')
+                        if _sel and (('closure' in _sel) != (2 in (s1, s2))):
                             continue
                         # No extra volume factor: window3 is normalized by
                         # the product of the two bispectrum-estimator
@@ -2430,17 +2506,33 @@ def compute_spectrum3_covariance(window2, window3, observable, theory=None, shot
                         # compute_fkp3_covariance_window) -- match that here.
                         p1, p2, p3 = tuple(sorted(w3_fields[0])), tuple(sorted(w3_fields[1])), tuple(sorted(w3_fields[2]))
                         p1, p2 = sorted((p1, p2))
+                        # Radial spec of the two primed separation axes: the
+                        # Wick permutation ties separation axis i to primed
+                        # leg s_i -- a binned leg (0, 1: the matching kpedges
+                        # column) or the closure leg (2: point-evaluated at
+                        # the node-dependent k3' magnitudes, mirroring the
+                        # box path's exact substitution).
+                        _paxes = (s1, s2)
+                        _kp_points = k3n_p if 2 in _paxes else None
                         for ell_w3 in w3_ells:
                             for ellp_w3 in w3_ells:
-                                blk = jnp.asarray(compute_spectrum3_covariance_window_block(
-                                    window3, edges, edgesp, ell_w3, ellp_w3,
-                                    fields1=p1, fields2=p2, fields3=p3,
-                                    cache=cache, batch_size=batch_size)).real
+                                bkey = (tuple(np.ravel(edges)), tuple(np.ravel(edgesp)), ell_w3, ellp_w3, p1, p2, p3, _paxes)
+                                if bkey not in ppp_block_cache:
+                                    ppp_block_cache[bkey] = np.asarray(compute_spectrum3_covariance_window_block(
+                                        window3, edges, edgesp, ell_w3, ellp_w3,
+                                        fields1=p1, fields2=p2, fields3=p3,
+                                        cache=cache, batch_size=batch_size,
+                                        paxes=_paxes, kp_points=_kp_points)).real
+                                blk = ppp_block_cache[bkey]
+                                if not np.any(blk):
+                                    continue
                                 if os.environ.get('COV3_BOX_DEBUG'):
-                                    print(f"win33 ppp blk {w3_fields} {ell_w3}x{ellp_w3}: max|blk| = {np.abs(np.asarray(blk)).max():.3e}")
-                                Sell_u = get_S(ell_w3, z3=True)(hat_u[0], hat_u[1])       # (nside, nbins)
-                                Sellp_p = get_S(ellp_w3, z3=True)(hat_p[s1], hat_p[s2])   # (nside, nbinsp)
-                                entry['blocks'].append((blk, Sell_u, Sellp_p))
+                                    print(f"win33 ppp blk {w3_fields} {ell_w3}x{ellp_w3}: max|blk| = {np.abs(blk).max():.3e}")
+                                if ell_w3 not in _Su_cache:
+                                    _Su_cache[ell_w3] = _get_S_cached(ell_w3)(hat_u[0], hat_u[1])           # (nside, nbins)
+                                if (ellp_w3, s1, s2) not in _Sp_cache:
+                                    _Sp_cache[ellp_w3, s1, s2] = _get_S_cached(ellp_w3)(hat_p[s1], hat_p[s2])   # (nside, nbinsp)
+                                entry['blocks'].append((jnp.asarray(blk), _Su_cache[ell_w3], _Sp_cache[ellp_w3, s1, s2]))
                         pre['ppp'].append(entry)
 
                     # (2) Connected BB term pieces: each bispectrum lives
@@ -2671,7 +2763,15 @@ def compute_spectrum3_covariance(window2, window3, observable, theory=None, shot
                                     left = left * A_u[m]
                                 else:
                                     right = right * B_p[m]
-                            block_PPP = block_PPP + 0.125 * blk * left.sum(axis=0)[:, None] * right.sum(axis=0)[None, :]
+                            if blk.ndim == 3:
+                                # Closure-leg entry: the block keeps a primed
+                                # node axis (a, b, n) -- contract it against
+                                # the per-node primed factors instead of
+                                # pre-summing them.
+                                term = jnp.einsum('a,nb,abn->ab', left.sum(axis=0), right, blk)
+                            else:
+                                term = blk * left.sum(axis=0)[:, None] * right.sum(axis=0)[None, :]
+                            block_PPP = block_PPP + 0.125 * term
                 block_PPP = norm33 * block_PPP
 
                 LBu, LBp = pre['bb_LBu'], pre['bb_LBp']
